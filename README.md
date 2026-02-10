@@ -7,7 +7,7 @@
 
 ## Architecture
 
-We use a **Daemon/UI** split to ensure zero-latency visualization while persisting high-resolution data for analysis.
+We use a **Daemon/UI** split with a **Parquet Lake** storage strategy to avoid database locks and ensure high-throughput ingestion.
 
 ```mermaid
 graph TD
@@ -19,11 +19,12 @@ graph TD
         Collector[Collector Service]
         Buffer[Ring Buffer]
         WSS[WebSocket Server]
-        DB_Writer[DuckDB Writer]
+        Parquet_Writer[Parquet Writer]
     end
 
-    subgraph "Data Layer"
-        DuckDB[(DuckDB / Parquet)]
+    subgraph "Data Layer (The Lake)"
+        FS[Filesystem: /data/raw/*.parquet]
+        DuckDB[DuckDB (Read-Only Analytics)]
     end
 
     subgraph "Frontend Layer (SvelteKit)"
@@ -34,17 +35,19 @@ graph TD
     Crown --> Collector
     Collector --> Buffer
     Buffer -- "Real-time Broadcast" --> WSS
-    Buffer -- "Batch Write" --> DB_Writer
-    DB_Writer --> DuckDB
+    Buffer -- "Batch Flush (1m)" --> Parquet_Writer
+    Parquet_Writer --> FS
 
     WSS -- "Live Stream" --> UI_Live
+    FS -- "Read" --> DuckDB
     DuckDB -- "Query History" --> UI_Journal
 ```
 
 ## Tech Stack
 
-*   **Collector:** Rust (Tokio, Tungstenite, Reqwest)
-*   **Storage:** DuckDB (Embedded OLAP)
+*   **Collector:** Rust (Tokio, Tungstenite, Reqwest, Parquet/Arrow)
+*   **Storage:** Parquet Files (Time-partitioned)
+*   **Analytics:** DuckDB (Embedded)
 *   **Frontend:** SvelteKit + Tailwind
 *   **Hardware:** Neurosity Crown
 
@@ -54,6 +57,7 @@ graph TD
 *   Rust (cargo)
 *   Neurosity Device (Crown)
 *   Credentials (in `.env`)
+*   `libssl-dev` (if using OpenSSL, though we now default to `rustls`)
 
 ### Quick Start
 
@@ -63,14 +67,23 @@ graph TD
     # Add DEVICE_ID, EMAIL, PASSWORD
     ```
 
-2.  **Run the Daemon:**
+2.  **Run the Daemon (Phase 2):**
     ```bash
     cargo run
     ```
+    This will:
+    - Start the **Collector** (authenticates & streams from Neurosity).
+    - Start the **WebSocket Server** on `ws://127.0.0.1:3000`.
+    - Start the **Parquet Writer** (flushes to `data/raw/` every ~60s).
+
+3.  **Verify:**
+    - **Logs:** Watch the terminal for "Collector: Streaming..." and "ParquetWriter: Flushed...".
+    - **WebSocket:** Connect with `wscat -c ws://localhost:3000` to see live JSON.
+    - **Files:** Check `ls -R data/raw/` after a minute.
 
 ## Development Status
-*   [ ] **Phase 1:** Hello Brain (Connect & Stream to Console)
-*   [ ] **Phase 2:** Data Pipeline (DuckDB Integration)
+*   [x] **Phase 1:** Hello Brain (Connect & Stream to Console)
+*   [x] **Phase 2:** Data Pipeline (Parquet Writer & WebSocket)
 *   [ ] **Phase 3:** Visualization (SvelteKit UI)
 *   [ ] **Phase 4:** Intelligence (AI Analysis)
 
