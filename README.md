@@ -24,7 +24,7 @@ graph TD
 
     subgraph "Data Layer (The Lake)"
         FS[Filesystem: /data/raw/*.parquet]
-        DuckDB[DuckDB (Read-Only Analytics)]
+        DuckDB["DuckDB (Read-Only Analytics)"]
     end
 
     subgraph "Frontend Layer (SvelteKit)"
