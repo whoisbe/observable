@@ -31,6 +31,17 @@ pub async fn run(mut rx: Receiver<Brainwave>) {
             }).await.expect("Parquet flush task failed");
         }
     }
+
+    // Flush any remaining buffered data on channel close (e.g. Ctrl+C shutdown)
+    if !buffer.is_empty() {
+        let n = buffer.len();
+        task::spawn_blocking(move || {
+            write_batch(&buffer);
+        })
+        .await
+        .expect("Parquet flush task failed");
+        println!("ParquetWriter: Flushed {} records on shutdown", n);
+    }
 }
 
 fn write_batch(buffer: &[Brainwave]) {

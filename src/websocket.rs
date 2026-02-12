@@ -2,6 +2,7 @@ use crate::types::Brainwave;
 use futures::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
+use tokio::sync::broadcast::error::RecvError;
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -27,15 +28,27 @@ async fn accept_connection(stream: TcpStream, mut rx: broadcast::Receiver<Brainw
     
     let (mut write, _read) = ws_stream.split();
 
-    while let Ok(bw) = rx.recv().await {
-        let msg = match serde_json::to_string(&bw) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        
-        if let Err(e) = write.send(Message::Text(msg.into())).await {
-            // Client disconnected
-            break;
+    loop {
+        match rx.recv().await {
+            Ok(bw) => {
+                let msg = match serde_json::to_string(&bw) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+
+                if let Err(_) = write.send(Message::Text(msg.into())).await {
+                    // Client disconnected
+                    break;
+                }
+            }
+            Err(RecvError::Lagged(n)) => {
+                // Receiver fell behind; skip missed messages and continue
+                eprintln!("WebSocket client lagged behind, skipped {} messages", n);
+                continue;
+            }
+            Err(RecvError::Closed) => {
+                break;
+            }
         }
     }
 }

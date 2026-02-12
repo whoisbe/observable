@@ -4,6 +4,7 @@ use serde::Deserialize;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::StreamExt;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Deserialize)]
 struct FirebaseAuthResponse {
@@ -21,6 +22,7 @@ const FIREBASE_DATABASE_URL: &str = "https://neurosity-device.firebaseio.com";
 pub async fn run(
     broadcast_tx: broadcast::Sender<Brainwave>,
     mpsc_tx: mpsc::Sender<Brainwave>,
+    cancel: CancellationToken,
 ) -> Result<(), String> {
     let (device_id, email, password) = load_env()?;
     let api_key = std::env::var("FIREBASE_API_KEY").unwrap_or_else(|_| FIREBASE_API_KEY.to_string());
@@ -34,7 +36,7 @@ pub async fn run(
     let id_token = firebase_login(&client, &email, &password, &api_key).await?;
     println!("Collector: Logged in. Connecting to stream...");
 
-    stream_loop(&client, &device_id, &id_token, broadcast_tx, mpsc_tx).await
+    stream_loop(&client, &device_id, &id_token, broadcast_tx, mpsc_tx, cancel).await
 }
 
 fn load_env() -> Result<(String, String, String), String> {
@@ -79,6 +81,7 @@ async fn stream_loop(
     id_token: &str,
     broadcast_tx: broadcast::Sender<Brainwave>,
     mpsc_tx: mpsc::Sender<Brainwave>,
+    cancel: CancellationToken,
 ) -> Result<(), String> {
     let base = FIREBASE_DATABASE_URL.trim_end_matches('/');
     let device_path = format!("{}/devices/{}", base, device_id);
@@ -125,7 +128,18 @@ async fn stream_loop(
 
     println!("Collector: Streaming brainwaves...");
 
-    while let Some(chunk_result) = stream.next().await {
+    loop {
+        let chunk_result = tokio::select! {
+            r = stream.next() => match r {
+                Some(res) => res,
+                None => break,
+            },
+            _ = cancel.cancelled() => {
+                println!("Collector: Shutdown requested, stopping stream");
+                break;
+            }
+        };
+
         let chunk = match chunk_result {
             Ok(c) => c,
             Err(e) => return Err(format!("Stream error: {}", e)),
@@ -141,13 +155,20 @@ async fn stream_loop(
             } else if line.is_empty() && !data_buf.is_empty() {
                 if data_buf != "null" {
                     if let Ok(bw_raw) = serde_json::from_str::<serde_json::Value>(&data_buf) {
-                        // Parse into Brainwave
-                        // Expected: {"data": [...], "timestamp": 123..., "label": "raw"}
-                        if let (Some(data), Some(ts), Some(label)) = (
-                            bw_raw.get("data").and_then(|v| v.as_array()),
-                            bw_raw.get("timestamp").and_then(|v| v.as_i64()),
-                            bw_raw.get("label").and_then(|v| v.as_str())
-                        ) {
+                        // Firebase RTDB REST SSE wraps events in {"path": "/", "data": <payload>}.
+                        // The brainwave itself is {"data": [...], "timestamp": ..., "label": ...}.
+                        // Unwrap the envelope so we parse the inner brainwave, not the outer object.
+                        let payload = if bw_raw.get("path").is_some() {
+                            bw_raw.get("data")
+                        } else {
+                            Some(&bw_raw)
+                        };
+                        if let Some(payload) = payload {
+                            if let (Some(data), Some(ts), Some(label)) = (
+                                payload.get("data").and_then(|v| v.as_array()),
+                                payload.get("timestamp").and_then(|v| v.as_i64()),
+                                payload.get("label").and_then(|v| v.as_str())
+                            ) {
                             let data_vec: Vec<f64> = data.iter().filter_map(|v| v.as_f64()).collect();
                             if data_vec.len() == 8 {
                                 let bw = Brainwave {
@@ -160,6 +181,7 @@ async fn stream_loop(
                                 let _ = broadcast_tx.send(bw.clone());
                                 let _ = mpsc_tx.send(bw).await;
                             }
+                        }
                         }
                     }
                 }

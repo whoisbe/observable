@@ -6,9 +6,3 @@ pub struct Brainwave {
     pub data: Vec<f64>,
     pub label: String,
 }
-
-// For internal communication
-#[derive(Debug, Clone)]
-pub enum Event {
-    Brainwave(Brainwave),
-}
